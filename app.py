@@ -2,6 +2,8 @@ import streamlit as st
 import pandas as pd
 from pymongo import MongoClient
 import matplotlib.pyplot as plt
+from collections import Counter
+import re
 
 # Koneksi MongoDB
 client = MongoClient(st.secrets["mongo_uri"])
@@ -10,7 +12,6 @@ collection = db['crawling_yt_revisi1']
 
 st.set_page_config(layout="wide", page_title="YouTube Data Visualization")
 st.title("Visualisasi Data Crawling YouTube dari MongoDB")
-
 @st.cache_data(ttl=600)
 def load_data():
     data = list(collection.find())
@@ -49,25 +50,6 @@ def parse_views(view_str):
 
 df['views_num'] = df['views'].apply(parse_views)
 
-# Parsing subscribers jika ada
-def parse_subscribers(sub_str):
-    if not sub_str:
-        return 0
-    sub_str = str(sub_str).lower().replace('subscribers', '').strip()
-    if 'k' in sub_str:
-        return int(float(sub_str.replace('k', '')) * 1e3)
-    elif 'm' in sub_str:
-        return int(float(sub_str.replace('m', '')) * 1e6)
-    try:
-        return int(float(sub_str))
-    except:
-        return 0
-
-if 'subscribers' in df.columns:
-    df['subscribers_num'] = df['subscribers'].apply(parse_subscribers)
-else:
-    df['subscribers_num'] = 0
-
 # Parsing tanggal
 def parse_date(date_str):
     try:
@@ -77,7 +59,13 @@ def parse_date(date_str):
 
 df['published_dt'] = df['published'].apply(parse_date)
 
-# Visualisasi 1: Top 5 Video Views
+# Parsing komentar
+if 'comments' in df.columns:
+    df['comments_num'] = pd.to_numeric(df['comments'], errors='coerce').fillna(0).astype(int)
+else:
+    df['comments_num'] = 0
+
+# --- Visualisasi 1: Top 5 Video dengan Viewers Tertinggi ---
 st.subheader("Top 5 Video dengan Viewers Tertinggi")
 top5 = df.sort_values(by='views_num', ascending=False).head(5)
 for idx, row in top5.iterrows():
@@ -94,9 +82,19 @@ for i, v in enumerate(top5['views_num']):
     ax1.text(v + max(top5['views_num']) * 0.01, i, f"{v:,}", va='center')
 st.pyplot(fig1)
 
-# Visualisasi 2: Top 10 Channel berdasarkan jumlah video
+# --- Visualisasi 2: Top 10 Channel berdasarkan jumlah video ---
 st.subheader("Top 10 Channel yang Paling Sering Membahas Bells Palsy")
-top_channels = df.groupby('channel').size().reset_index(name='jumlah_video').sort_values(by='jumlah_video', ascending=False).head(10)
+
+# Hilangkan channel yang kosong (NaN atau string kosong)
+df_clean = df[df['channel'].notna() & (df['channel'].str.strip() != '')]
+
+top_channels = (
+    df_clean.groupby('channel')
+    .size()
+    .reset_index(name='jumlah_video')
+    .sort_values(by='jumlah_video', ascending=False)
+    .head(10)
+)
 
 fig2, ax2 = plt.subplots(figsize=(10, 5))
 ax2.barh(top_channels['channel'], top_channels['jumlah_video'], color='#4B7BF5')
@@ -108,17 +106,41 @@ for i, v in enumerate(top_channels['jumlah_video']):
     ax2.text(v + max(top_channels['jumlah_video']) * 0.01, i, f"{v}", va='center')
 st.pyplot(fig2)
 
-# Visualisasi 3: Top 10 Channel berdasarkan subscriber
-st.subheader("Top 10 Channel berdasarkan Jumlah Subscriber")
-top_channels_subs = df.groupby('channel').agg({'subscribers_num': 'max'}).reset_index()
-top_channels_subs = top_channels_subs.sort_values(by='subscribers_num', ascending=False).head(10)
+
+# --- Visualisasi 3: Top 10 Channel berdasarkan Jumlah Komentar ---
+st.subheader("Top 10 Channel berdasarkan Aktivitas Komentar Pengguna")
+top_channels_comments = df.groupby('channel').agg({'comments_num': 'sum'}).reset_index()
+top_channels_comments = top_channels_comments.sort_values(by='comments_num', ascending=False).head(10)
 
 fig3, ax3 = plt.subplots(figsize=(10, 5))
-ax3.barh(top_channels_subs['channel'], top_channels_subs['subscribers_num'], color='#2CA02C')
+ax3.barh(top_channels_comments['channel'], top_channels_comments['comments_num'], color='#FFA500')
 ax3.invert_yaxis()
-ax3.set_xlabel('Jumlah Subscriber')
+ax3.set_xlabel('Jumlah Komentar')
 ax3.set_ylabel('Channel')
-ax3.set_title('Top 10 Channel berdasarkan Subscriber')
-for i, v in enumerate(top_channels_subs['subscribers_num']):
-    ax3.text(v + max(top_channels_subs['subscribers_num']) * 0.01, i, f"{v:,}", va='center')
+ax3.set_title('Top 10 Channel dengan Komentar Terbanyak')
+for i, v in enumerate(top_channels_comments['comments_num']):
+    ax3.text(v + max(top_channels_comments['comments_num']) * 0.01, i, f"{v:,}", va='center')
 st.pyplot(fig3)
+
+# --- Visualisasi 4: Top Kata Kunci yang Sering Muncul di Judul Video ---
+st.subheader("Top Kata Kunci yang Sering Muncul di Judul Video")
+
+# Ambil semua judul, ubah jadi lowercase dan tokenize kata (hilangkan simbol non alphabet)
+all_titles = df['title'].dropna().str.lower().str.cat(sep=' ')
+words = re.findall(r'\b[a-zA-Z]{2,}\b', all_titles)  # hanya kata dengan 2+ huruf
+
+# Hitung frekuensi kata
+word_freq = Counter(words)
+
+# DataFrame 15 kata terpopuler
+top_keywords_df = pd.DataFrame(word_freq.most_common(15), columns=['Kata Kunci', 'Jumlah Kemunculan'])
+
+# Tampilkan tabel
+st.dataframe(top_keywords_df)
+
+# Visualisasi bar chart
+fig_kw, ax_kw = plt.subplots(figsize=(10, 5))
+ax_kw.barh(top_keywords_df['Kata Kunci'][::-1], top_keywords_df['Jumlah Kemunculan'][::-1], color='#FFA07A')
+ax_kw.set_xlabel("Jumlah Kemunculan")
+ax_kw.set_title("Top 15 Kata Kunci yang Paling Sering Muncul di Judul Video")
+st.pyplot(fig_kw)
